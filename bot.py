@@ -1,6 +1,5 @@
 import discord
 from discord.ext import commands
-import speech_recognition as sr
 import tempfile
 from gtts import gTTS
 import asyncio
@@ -10,35 +9,11 @@ from discord.ui import View, Button
 from deep_translator import GoogleTranslator
 import textwrap
 from dotenv import load_dotenv
-from playsound import playsound
 import os
-import sounddevice as sd
-import numpy as np
-import speech_recognition as sr
+import pygame
+from google.cloud import speech
 
-try:
-    import pygame
-    # Try to initialize mixer with error handling
-    if not pygame.mixer.get_init():
-        try:
-            pygame.mixer.init()
-            AUDIO_ENABLED = True
-            print("Audio system initialized successfully")
-        except Exception as e:
-            print(f"Audio initialization failed: {e}")
-            AUDIO_ENABLED = False
-except ImportError:
-    print("Pygame not available, audio disabled")
-    pygame = None
-    AUDIO_ENABLED = False
-
-# Rest of your imports
-import discord
-from discord.ext import commands
-
-# ======================
-# Configuration
-# ======================
+# Load environment variables
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
@@ -60,6 +35,9 @@ intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Initialize Google Cloud Speech client
+speech_client = speech.SpeechClient()
 
 async def generate_tts(text, lang, filename):
     def _save_tts():
@@ -131,40 +109,29 @@ def get_groq_response(prompt, lang="en"):
         return f"Error getting AI response: {e}"
 
 async def play_audio(audio_file):
-    if not AUDIO_ENABLED:
-        print("Audio playback skipped (audio system not available)")
-        try:
-            os.remove(audio_file)
-        except:
-            pass
-        return
-    
     try:
-        # Initialize mixer if not already initialized
-        if not pygame.mixer.get_init():
+        if pygame.mixer.get_init() == 0:
             pygame.mixer.init()
-            
+
         pygame.mixer.music.load(audio_file)
         pygame.mixer.music.play()
-        
-        # Wait for playback to finish
+
         while pygame.mixer.music.get_busy():
             await asyncio.sleep(0.1)
-            
+
     except Exception as e:
         print(f"Audio playback error: {e}")
         try:
-            # Fallback to playsound if available
             from playsound import playsound
             playsound(audio_file)
         except:
             print("Could not play audio with any method")
     finally:
         try:
-            pygame.mixer.quit()
             os.remove(audio_file)
         except:
             pass
+
 # ======================
 # Events
 # ======================
@@ -198,19 +165,29 @@ async def start_voice_interaction(interaction):
 
     await interaction.followup.send("🎙️ Speak now...")
 
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        try:
-            audio = recognizer.listen(source, phrase_time_limit=10)
-            recognized_text = recognizer.recognize_google(audio)
-            await interaction.followup.send(f"📝 You said: {recognized_text}")
-        except sr.UnknownValueError:
-            await voice_client.disconnect()
-            return await interaction.followup.send("❌ Could not understand audio.")
-        except Exception as e:
-            await voice_client.disconnect()
-            return await interaction.followup.send(f"❌ Error: {e}")
+    audio_file = os.path.join(tempfile.gettempdir(), "audio.wav")
+    # Capture audio using Discord voice client and save to file
+    await voice_client.listen(audio_file)
+
+    # Process audio with Google Cloud Speech-to-Text API
+    with open(audio_file, 'rb') as audio:
+        audio_content = audio.read()
+
+    audio = speech.RecognitionAudio(content=audio_content)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=16000,
+        language_code='en-US',
+    )
+
+    response = speech_client.recognize(config=config, audio=audio)
+    if response.results:
+        recognized_text = response.results[0].alternatives[0].transcript
+    else:
+        await voice_client.disconnect()
+        return await interaction.followup.send("❌ Could not understand audio.")
+
+    await interaction.followup.send(f"📝 You said: {recognized_text}")
 
     english_text = translate_text(recognized_text, 'en')
     groq_response_en = get_groq_response(english_text)
