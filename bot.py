@@ -18,6 +18,7 @@ from discord.ui import View, Button
 from deep_translator import GoogleTranslator
 import textwrap
 from dotenv import load_dotenv
+from playsound import playsound
 
 # ======================
 # Configuration
@@ -117,9 +118,7 @@ async def play_audio(audio_file):
     if pygame:
         try:
             if not pygame.mixer.get_init():
-                pygame.mixer.init()
-            pygame.mixer.music.load(audio_file)
-            pygame.mixer.music.play()
+                playsound("output.mp3")
             while pygame.mixer.music.get_busy():
                 await asyncio.sleep(0.1)
         finally:

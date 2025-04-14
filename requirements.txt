@@ -6,3 +6,4 @@ requests
 python-dotenv
 deep-translator
 PyNaCl
+playsound==1.2.2
