@@ -122,19 +122,24 @@ async def recording_callback(sink, interaction):
 @bot.event
 async def on_ready():
     print(f"✅ Bot is now online as {bot.user}")
-
-@bot.command()
-async def ping(ctx):
-    await ctx.send("🏓 Pong!")
+    print(f"Guilds: {[g.name for g in bot.guilds]}")
 
 async def start_voice_interaction(interaction):
+    print(f"Starting voice interaction for user {interaction.user}")
     user = interaction.user
     if not user.voice or not user.voice.channel:
+        print("User not in voice channel")
         return await interaction.followup.send("❗ Join a voice channel first!", ephemeral=True)
 
-    voice_client = await user.voice.channel.connect()
+    try:
+        voice_client = await user.voice.channel.connect()
+        print(f"Connected to voice channel: {user.voice.channel.name}")
+    except Exception as e:
+        print(f"Voice connection failed: {e}")
+        return await interaction.followup.send(f"❌ Failed to join voice channel: {e}")
+
     await interaction.followup.send("🌐 Available Languages:\n" + "\n".join([f"{k} - {v}" for k, v in LANGUAGES.items()]))
-    await interaction.followup.send("💬 Type your preferred language code (e.g., en, te BODY):")
+    await interaction.followup.send("💬 Type your preferred language code (e.g., en, te):")
 
     def check(m):
         return m.author == user and m.channel == interaction.channel and m.content.lower() in LANGUAGES
@@ -142,8 +147,10 @@ async def start_voice_interaction(interaction):
     try:
         lang_msg = await bot.wait_for('message', timeout=30.0, check=check)
         user_lang = lang_msg.content.lower()
+        print(f"User selected language: {user_lang}")
     except asyncio.TimeoutError:
         await voice_client.disconnect()
+        print("Language selection timed out")
         return await interaction.followup.send("⌛ You took too long to reply.")
 
     await interaction.followup.send("🎙️ Speak now...")
@@ -151,18 +158,23 @@ async def start_voice_interaction(interaction):
     # Record audio from voice channel
     try:
         sink = discord.sinks.WaveSink()
-    except AttributeError:
+        print("Initialized WaveSink")
+    except Exception as e:
         await voice_client.disconnect()
-        return await interaction.followup.send("❌ Voice recording not supported. Please update discord.py.")
+        print(f"WaveSink error: {e}")
+        return await interaction.followup.send(f"❌ Voice recording not supported: {e}")
 
     voice_client.start_recording(sink, recording_callback, interaction)
+    print("Started recording")
     await asyncio.sleep(10)  # Record for 10 seconds
     voice_client.stop_recording()
+    print("Stopped recording")
 
     # Process recorded audio
     temp_wav = await recording_callback(sink, interaction)
     if not temp_wav:
         await voice_client.disconnect()
+        print("No audio recorded")
         return await interaction.followup.send("❌ Failed to record audio.")
 
     # Process audio with Vosk
@@ -170,6 +182,7 @@ async def start_voice_interaction(interaction):
         model = vosk.Model("models/vosk-model-small-en-us-0.15")
         wf = wave.open(temp_wav, "rb")
         recognizer = vosk.KaldiRecognizer(model, wf.getframerate())
+        print("Initialized Vosk model")
         while True:
             data = wf.readframes(4000)
             if len(data) == 0:
@@ -177,16 +190,19 @@ async def start_voice_interaction(interaction):
             if recognizer.AcceptWaveform(data):
                 result = recognizer.Result()
                 recognized_text = json.loads(result).get("text", "")
+                print(f"Recognized text: {recognized_text}")
                 break
         wf.close()
     except Exception as e:
         await voice_client.disconnect()
         os.remove(temp_wav)
+        print(f"Vosk error: {e}")
         return await interaction.followup.send(f"❌ Voice recognition failed: {e}")
 
     os.remove(temp_wav)
     if not recognized_text:
         await voice_client.disconnect()
+        print("No text recognized")
         return await interaction.followup.send("❌ Could not understand audio.")
 
     await interaction.followup.send(f"📝 You said: {recognized_text}")
@@ -206,10 +222,13 @@ async def start_voice_interaction(interaction):
         await generate_tts(final_response, user_lang, temp_file)
         await interaction.followup.send(file=discord.File(temp_file))
         os.remove(temp_file)
+        print("Sent TTS audio")
     except Exception as e:
         await interaction.followup.send(f"🔊 Audio generation failed: {e}")
+        print(f"TTS error: {e}")
 
     await voice_client.disconnect()
+    print("Disconnected from voice channel")
     await send_listen_button(interaction.channel, user)
 
 # Run
