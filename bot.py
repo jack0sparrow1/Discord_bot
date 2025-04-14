@@ -1,10 +1,16 @@
+import os
+if os.environ.get('RENDER') == 'true':
+    print("Running on Render, skipping audio initialization.")
+    pygame = None
+else:
+    import pygame
+    pygame.mixer.init()
+
 import discord
 from discord.ext import commands
 import speech_recognition as sr
 import tempfile
-import os
 from gtts import gTTS
-import pygame
 import asyncio
 import time
 import requests
@@ -12,6 +18,7 @@ from discord.ui import View, Button
 from deep_translator import GoogleTranslator
 import textwrap
 from dotenv import load_dotenv
+
 # ======================
 # Configuration
 # ======================
@@ -19,12 +26,6 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if os.environ.get('RENDER') == 'true':
-    print("Running on Render, skipping audio initialization.")
-else:
-    import pygame
-    pygame.mixer.init()
 
 LANGUAGES = {
     "en": "English",
@@ -42,7 +43,6 @@ intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-pygame.mixer.init()
 
 async def generate_tts(text, lang, filename):
     def _save_tts():
@@ -114,19 +114,22 @@ def get_groq_response(prompt, lang="en"):
         return f"Error getting AI response: {e}"
 
 async def play_audio(audio_file):
-    try:
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        pygame.mixer.music.load(audio_file)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            await asyncio.sleep(0.1)
-    finally:
-        pygame.mixer.quit()
+    if pygame:
         try:
-            os.remove(audio_file)
-        except:
-            pass    
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            pygame.mixer.music.load(audio_file)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                await asyncio.sleep(0.1)
+        finally:
+            pygame.mixer.quit()
+            try:
+                os.remove(audio_file)
+            except:
+                pass
+    else:
+        print("Audio skipped (running on Render).")
 
 # ======================
 # Events
@@ -163,9 +166,9 @@ async def start_voice_interaction(interaction):
 
     recognizer = sr.Recognizer()
     with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)  # NEW
+        recognizer.adjust_for_ambient_noise(source, duration=1)
         try:
-            audio = recognizer.listen(source, phrase_time_limit=10)  # NEW
+            audio = recognizer.listen(source, phrase_time_limit=10)
             recognized_text = recognizer.recognize_google(audio)
             await interaction.followup.send(f"📝 You said: {recognized_text}")
         except sr.UnknownValueError:
@@ -178,12 +181,10 @@ async def start_voice_interaction(interaction):
     english_text = translate_text(recognized_text, 'en')
     groq_response_en = get_groq_response(english_text)
     final_response = translate_text(groq_response_en, user_lang)
-# Split and send the response in chunks of max 2000 characters
-    chunks = textwrap.wrap(final_response, width=1900, break_long_words=False)
 
+    chunks = textwrap.wrap(final_response, width=1900, break_long_words=False)
     for chunk in chunks:
         await interaction.followup.send(f"🤖 AidBot:\n```\n{chunk}\n```")
-
 
     temp_file = os.path.join(tempfile.gettempdir(), f"response_{int(time.time())}.mp3")
     try:
