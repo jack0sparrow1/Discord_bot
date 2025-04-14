@@ -1,0 +1,8 @@
+discord.py
+SpeechRecognition
+gTTS
+pygame
+requests
+python-dotenv
+deep-translator
+PyNaCl
