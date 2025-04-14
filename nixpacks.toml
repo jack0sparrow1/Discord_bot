@@ -1,9 +1,0 @@
-[phases.setup]
-nixPkgs = ["python3", "portaudio", "gcc", "ffmpeg"]
-aptPkgs = ["libportaudio2", "libportaudiocpp0", "portaudio19-dev"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "python main.py"
