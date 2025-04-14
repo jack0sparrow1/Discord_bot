@@ -12,6 +12,10 @@ import textwrap
 from dotenv import load_dotenv
 import vosk
 import wave
+import sounddevice as sd
+import numpy as np
+import speech_recognition as sr
+
 import json
 
 # Load environment variables
@@ -114,10 +118,14 @@ async def start_voice_interaction(interaction):
     if not user.voice or not user.voice.channel:
         return await interaction.followup.send("❗ Join a voice channel first!", ephemeral=True)
 
+    # Join the voice channel
     voice_client = await user.voice.channel.connect()
+
+    # Send a message to the user with available languages
     await interaction.followup.send("🌐 Available Languages:\n" + "\n".join([f"{k} - {v}" for k, v in LANGUAGES.items()]))
     await interaction.followup.send("💬 Type your preferred language code (e.g., en, te):")
 
+    # Wait for user to choose a language
     def check(m):
         return m.author == user and m.channel == interaction.channel and m.content.lower() in LANGUAGES
 
@@ -130,28 +138,23 @@ async def start_voice_interaction(interaction):
 
     await interaction.followup.send("🎙️ Speak now...")
 
-    # Record audio from the voice channel
-    sink = discord.sinks.WaveSink()
-    voice_client.start_recording(sink, lambda s, _: None, interaction)
-    await asyncio.sleep(10)
-    voice_client.stop_recording()
+    # Record audio from the user's microphone using sounddevice
+    fs = 16000  # Sample rate for sounddevice
+    duration = 10  # Duration to listen for (in seconds)
+    audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
+    sd.wait()  # Wait until the recording is finished
 
-    if not sink.audio_data:
+    if audio_data is None:
         await voice_client.disconnect()
         return await interaction.followup.send("❌ No audio recorded.")
 
-    # Save the recorded audio
-    user_audio = sink.audio_data.get(user.id)
-    if not user_audio:
-        await voice_client.disconnect()
-        return await interaction.followup.send("❌ Could not retrieve your audio.")
-
+    # Save the audio to a temporary WAV file
     temp_wav = os.path.join(tempfile.gettempdir(), f"temp_{int(time.time())}.wav")
     with wave.open(temp_wav, 'wb') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)
-        wf.setframerate(48000)
-        wf.writeframes(user_audio.file.read())
+        wf.setnchannels(1)  # Mono channel
+        wf.setsampwidth(2)  # 2 bytes per sample (16-bit)
+        wf.setframerate(fs)
+        wf.writeframes(audio_data.tobytes())
 
     try:
         model = vosk.Model("vosk-model-small-en-us-0.15")
@@ -180,13 +183,16 @@ async def start_voice_interaction(interaction):
 
     await interaction.followup.send(f"📝 You said: {recognized_text}")
 
+    # Translate the recognized text to English and get a response from Groq
     english_text = translate_text(recognized_text, 'en')
     groq_response_en = get_groq_response(english_text)
     final_response = translate_text(groq_response_en, user_lang)
 
+    # Send the response in chunks if it's too long
     for chunk in textwrap.wrap(final_response, width=1900):
         await interaction.followup.send(f"🤖 AidBot:\n```\n{chunk}\n```")
 
+    # Generate the TTS audio
     temp_mp3 = os.path.join(tempfile.gettempdir(), f"response_{int(time.time())}.mp3")
     try:
         await generate_tts(final_response, user_lang, temp_mp3)
@@ -197,5 +203,6 @@ async def start_voice_interaction(interaction):
 
     await voice_client.disconnect()
     await send_listen_button(interaction.channel, user)
+
 
 bot.run(TOKEN)
