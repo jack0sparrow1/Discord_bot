@@ -1,241 +1,145 @@
-import os
-if os.environ.get('RENDER') == 'false':
-    print("Running on Render, skipping audio initialization.")
-    pygame = None
-else:
-    import pygame
-    pygame.mixer.init()
-
-import discord
-from discord.ext import commands
+from flask import Flask, request, jsonify
+from groq import Groq
+from deep_translator import GoogleTranslator
+from gtts import gTTS
 import speech_recognition as sr
 import tempfile
-from gtts import gTTS
-import asyncio
-import time
-import requests
-from discord.ui import View, Button 
-from deep_translator import GoogleTranslator
-import textwrap
+import base64
+import os
+import re
 from dotenv import load_dotenv
-from playsound import playsound
+import warnings
 
-try:
-    import pygame
-    # Try to initialize mixer with error handling
-    if not pygame.mixer.get_init():
-        try:
-            pygame.mixer.init()
-            AUDIO_ENABLED = True
-            print("Audio system initialized successfully")
-        except Exception as e:
-            print(f"Audio initialization failed: {e}")
-            AUDIO_ENABLED = False
-except ImportError:
-    print("Pygame not available, audio disabled")
-    pygame = None
-    AUDIO_ENABLED = False
-
-# Rest of your imports
-import discord
-from discord.ext import commands
-
-# ======================
-# Configuration
-# ======================
+# Load environment variables
 load_dotenv()
 
-TOKEN = os.getenv("TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Initialize Flask app
+app = Flask(__name__)
 
+# Setup Groq client
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
+
+# Supported languages
 LANGUAGES = {
-    "en": "English",
-    "hi": "Hindi",
-    "te": "Telugu",
-    "ta": "Tamil",
-    "ml": "Malayalam",
-    "kn": "Kannada",
-    "pa": "Punjabi",
-    "mr": "Marathi"
+    'hi': 'Hindi', 'te': 'Telugu', 'ta': 'Tamil', 'bn': 'Bengali',
+    'mr': 'Marathi', 'ml': 'Malayalam', 'kn': 'Kannada', 'en': 'English'
 }
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-async def generate_tts(text, lang, filename):
-    def _save_tts():
-        tts = gTTS(text=text, lang=lang)
-        tts.save(filename)
-    await asyncio.to_thread(_save_tts)
-
-# ======================
-# Views
-# ======================
-class ListenView(View):
-    def __init__(self, user):
-        super().__init__(timeout=None)
-        self.user = user
-
-    @discord.ui.button(label="🎙️ Start Talking", style=discord.ButtonStyle.primary)
-    async def listen_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user != self.user:
-            await interaction.response.send_message("❌ You can't use this button.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        await start_voice_interaction(interaction)
-
-# ======================
-# Helpers
-# ======================
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if before.channel is None and after.channel is not None and not member.bot:
-        text_channels = [c for c in after.channel.guild.text_channels if c.permissions_for(member).send_messages]
-        if text_channels:
-            await send_listen_button(text_channels[0], member)
-
-async def send_listen_button(channel, user):
-    view = ListenView(user)
-    await channel.send("Click below to talk to AidBot 👇", view=view)
-
-def translate_text(text, target_lang='en'):
+def translate_text(text: str, target_lang: str, source_lang: str = 'auto') -> str:
+    """Translates input text to the target language."""
     try:
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+        if source_lang == target_lang:
+            return text
+        return GoogleTranslator(source=source_lang, target=target_lang).translate(text)
     except Exception as e:
-        print(f"Translation Error: {e}")
+        warnings.warn(f"Translation failed: {str(e)}")
         return text
 
-def get_groq_response(prompt, lang="en"):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    system_prompt = f"""
-    You are AidBot, a multilingual disaster relief assistant. 
-    Your goal is to explain disaster-related news and topics clearly in less than 1990 characters.
-    """
-    data = {
-        "model": "llama3-70b-8192",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 2000
-    }
+def get_groq_response(prompt: str, model: str = "llama3-70b-8192") -> str:
+    """Gets AI response in English (Groq always returns English)."""
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content'].strip()
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            temperature=0.3
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        return f"Error getting AI response: {e}"
+        raise RuntimeError(f"Groq API error: {str(e)}")
 
-async def play_audio(audio_file):
-    if not AUDIO_ENABLED:
-        print("Audio playback skipped (audio system not available)")
-        try:
-            os.remove(audio_file)
-        except:
-            pass
-        return
+def speak_text(text: str, lang: str = 'en') -> str:
+    """Converts text to speech and returns the audio as base64."""
+    try:
+        tts = gTTS(text=text, lang=lang)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+            temp_path = fp.name
+        tts.save(temp_path)
+        with open(temp_path, "rb") as audio_file:
+            encoded_string = base64.b64encode(audio_file.read()).decode('utf-8')
+        os.remove(temp_path)
+        return encoded_string
+    except Exception as e:
+        return f"TTS generation failed: {e}"
+
+@app.route("/languages", methods=["GET"])
+def get_languages():
+    """Returns the available languages."""
+    return jsonify(LANGUAGES)
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    """Handles user input text and returns AI response in the target language."""
+    data = request.get_json()
+    user_input = data.get("input")
+    lang_code = data.get("lang_code", "en")
+
+    if not user_input:
+        return jsonify({"error": "Missing input text"}), 400
+
+    # Translate user input to English
+    english_input = translate_text(user_input, 'en', lang_code)
     
-    try:
-        # Initialize mixer if not already initialized
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-            
-        pygame.mixer.music.load(audio_file)
-        pygame.mixer.music.play()
-        
-        # Wait for playback to finish
-        while pygame.mixer.music.get_busy():
-            await asyncio.sleep(0.1)
-            
-    except Exception as e:
-        print(f"Audio playback error: {e}")
-        try:
-            # Fallback to playsound if available
-            from playsound import playsound
-            playsound(audio_file)
-        except:
-            print("Could not play audio with any method")
-    finally:
-        try:
-            pygame.mixer.quit()
-            os.remove(audio_file)
-        except:
-            pass
-# ======================
-# Events
-# ======================
-@bot.event
-async def on_ready():
-    print(f"✅ Bot is now online as {bot.user}")
+    # If input is too short, add context
+    if len(english_input.strip().split()) < 3:
+        english_input = f"This is a disaster-related question: {english_input}"
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send("🏓 Pong!")
+    # Get Groq response in English
+    response_text = get_groq_response(english_input)
 
-async def start_voice_interaction(interaction):
-    user = interaction.user
-    if not user.voice or not user.voice.channel:
-        return await interaction.followup.send("❗ Join a voice channel first!", ephemeral=True)
+    # Translate the response to the target language
+    translated_response = translate_text(response_text, lang_code, 'en')
 
-    voice_client = await user.voice.channel.connect()
+    # Clean the response for text-to-speech
+    cleaned_response = re.sub(r"[•*+→\-\–\—▶️🌐🎙️📝🚨🔈💡❗✅🔁📍📢🔥]", "", translated_response)
 
-    await interaction.followup.send("🌐 Available Languages:\n" + "\n".join([f"{k} - {v}" for k, v in LANGUAGES.items()]))
-    await interaction.followup.send("💬 Type your preferred language code (e.g., en, te):")
+    return jsonify({
+        "response": cleaned_response.strip()
+    })
 
-    def check(m):
-        return m.author == user and m.channel == interaction.channel and m.content.lower() in LANGUAGES
+@app.route("/speak", methods=["POST"])
+def speak():
+    """Generates and returns the speech for given text."""
+    data = request.get_json()
+    text = data.get("text")
+    lang = data.get("lang", "en")
 
-    try:
-        lang_msg = await bot.wait_for('message', timeout=30.0, check=check)
-        user_lang = lang_msg.content.lower()
-    except asyncio.TimeoutError:
-        await voice_client.disconnect()
-        return await interaction.followup.send("⌛ You took too long to reply.")
+    if not text:
+        return jsonify({"error": "Missing text to speak"}), 400
 
-    await interaction.followup.send("🎙️ Speak now...")
+    audio_base64 = speak_text(text, lang)
+    return jsonify({"audio_base64": audio_base64})
 
+@app.route("/voice", methods=["POST"])
+def voice():
+    """Handles voice input and returns AI response as audio output."""
+    lang_code = request.args.get("lang_code", "en")
     recognizer = sr.Recognizer()
+    
     with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1)
         try:
-            audio = recognizer.listen(source, phrase_time_limit=10)
-            recognized_text = recognizer.recognize_google(audio)
-            await interaction.followup.send(f"📝 You said: {recognized_text}")
-        except sr.UnknownValueError:
-            await voice_client.disconnect()
-            return await interaction.followup.send("❌ Could not understand audio.")
+            recognizer.adjust_for_ambient_noise(source, duration=1.5)
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=15)
+            user_input = recognizer.recognize_google(audio, language=f"{lang_code}-IN")
+            
+            # Step 1: Translate user input to English
+            english_input = translate_text(user_input, 'en', lang_code)
+            if len(english_input.strip().split()) < 3:
+                english_input = f"This is a disaster-related question: {english_input}"
+
+            # Step 2: Get AI response in English from Groq
+            response_text = get_groq_response(english_input)
+
+            # Step 3: Translate response to the user’s language
+            translated_response = translate_text(response_text, lang_code, 'en')
+
+            # Step 4: Convert translated response to audio
+            audio_base64 = speak_text(translated_response, lang_code)
+
+            return jsonify({"audio_base64": audio_base64})
+
         except Exception as e:
-            await voice_client.disconnect()
-            return await interaction.followup.send(f"❌ Error: {e}")
+            return jsonify({"error": f"Voice input failed: {str(e)}"}), 500
 
-    english_text = translate_text(recognized_text, 'en')
-    groq_response_en = get_groq_response(english_text)
-    final_response = translate_text(groq_response_en, user_lang)
-
-    chunks = textwrap.wrap(final_response, width=1900, break_long_words=False)
-    for chunk in chunks:
-        await interaction.followup.send(f"🤖 AidBot:\n```\n{chunk}\n```")
-
-    temp_file = os.path.join(tempfile.gettempdir(), f"response_{int(time.time())}.mp3")
-    try:
-        tts = gTTS(text=final_response, lang=user_lang)
-        tts.save(temp_file)
-        await play_audio(temp_file)
-    except Exception as e:
-        await interaction.followup.send(f"🔊 Audio playback error: {e}")
-
-    await voice_client.disconnect()
-    await send_listen_button(interaction.channel, user)
-
-# ======================
-# Run
-# ======================
-bot.run(TOKEN)
+if __name__ == "__main__":
+    app.run(debug=True)

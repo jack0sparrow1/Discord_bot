@@ -9,3 +9,10 @@ requests
 playsound
 pygame
 PyAudio
+discord.py
+gTTS
+deep-translator
+python-dotenv
+requests
+vosk
+pydub
