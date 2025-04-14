@@ -1,5 +1,5 @@
 import os
-if os.environ.get('RENDER') == 'true':
+if os.environ.get('RENDER') == 'false':
     print("Running on Render, skipping audio initialization.")
     pygame = None
 else:
