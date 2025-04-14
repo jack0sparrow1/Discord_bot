@@ -20,6 +20,11 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+if os.environ.get('RENDER') == 'true':
+    print("Running on Render, skipping audio initialization.")
+else:
+    import pygame
+    pygame.mixer.init()
 
 LANGUAGES = {
     "en": "English",
