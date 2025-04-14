@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands
 import tempfile
@@ -5,17 +6,16 @@ from gtts import gTTS
 import asyncio
 import time
 import requests
-from discord.ui import View, Button 
+from discord.ui import View, Button
 from deep_translator import GoogleTranslator
 import textwrap
 from dotenv import load_dotenv
-import os
-import pygame
-from google.cloud import speech
+import vosk
+import wave
+import json
 
 # Load environment variables
 load_dotenv()
-
 TOKEN = os.getenv("TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -36,18 +36,13 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Initialize Google Cloud Speech client
-speech_client = speech.SpeechClient()
-
 async def generate_tts(text, lang, filename):
     def _save_tts():
         tts = gTTS(text=text, lang=lang)
         tts.save(filename)
     await asyncio.to_thread(_save_tts)
 
-# ======================
 # Views
-# ======================
 class ListenView(View):
     def __init__(self, user):
         super().__init__(timeout=None)
@@ -61,9 +56,7 @@ class ListenView(View):
         await interaction.response.defer()
         await start_voice_interaction(interaction)
 
-# ======================
 # Helpers
-# ======================
 @bot.event
 async def on_voice_state_update(member, before, after):
     if before.channel is None and after.channel is not None and not member.bot:
@@ -88,8 +81,8 @@ def get_groq_response(prompt, lang="en"):
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-    system_prompt = f"""
-    You are AidBot, a multilingual disaster relief assistant. 
+    system_prompt = """
+    You are AidBot, a multilingual disaster relief assistant.
     Your goal is to explain disaster-related news and topics clearly in less than 1990 characters.
     """
     data = {
@@ -108,33 +101,24 @@ def get_groq_response(prompt, lang="en"):
     except Exception as e:
         return f"Error getting AI response: {e}"
 
-async def play_audio(audio_file):
+# Voice recording callback
+async def recording_callback(sink, interaction):
+    temp_wav = os.path.join(tempfile.gettempdir(), f"temp_{int(time.time())}.wav")
+    user = interaction.user
     try:
-        if pygame.mixer.get_init() == 0:
-            pygame.mixer.init()
-
-        pygame.mixer.music.load(audio_file)
-        pygame.mixer.music.play()
-
-        while pygame.mixer.music.get_busy():
-            await asyncio.sleep(0.1)
-
+        with wave.open(temp_wav, 'wb') as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            audio_data = sink.audio_data.get(user.id)
+            if audio_data:
+                wf.writeframes(audio_data.get('audio'))
+        return temp_wav
     except Exception as e:
-        print(f"Audio playback error: {e}")
-        try:
-            from playsound import playsound
-            playsound(audio_file)
-        except:
-            print("Could not play audio with any method")
-    finally:
-        try:
-            os.remove(audio_file)
-        except:
-            pass
+        print(f"Recording error: {e}")
+        return None
 
-# ======================
 # Events
-# ======================
 @bot.event
 async def on_ready():
     print(f"✅ Bot is now online as {bot.user}")
@@ -149,9 +133,8 @@ async def start_voice_interaction(interaction):
         return await interaction.followup.send("❗ Join a voice channel first!", ephemeral=True)
 
     voice_client = await user.voice.channel.connect()
-
     await interaction.followup.send("🌐 Available Languages:\n" + "\n".join([f"{k} - {v}" for k, v in LANGUAGES.items()]))
-    await interaction.followup.send("💬 Type your preferred language code (e.g., en, te):")
+    await interaction.followup.send("💬 Type your preferred language code (e.g., en, te BODY):")
 
     def check(m):
         return m.author == user and m.channel == interaction.channel and m.content.lower() in LANGUAGES
@@ -165,30 +148,50 @@ async def start_voice_interaction(interaction):
 
     await interaction.followup.send("🎙️ Speak now...")
 
-    audio_file = os.path.join(tempfile.gettempdir(), "audio.wav")
-    # Capture audio using Discord voice client and save to file
-    await voice_client.listen(audio_file)
+    # Record audio from voice channel
+    try:
+        sink = discord.sinks.WaveSink()
+    except AttributeError:
+        await voice_client.disconnect()
+        return await interaction.followup.send("❌ Voice recording not supported. Please update discord.py.")
 
-    # Process audio with Google Cloud Speech-to-Text API
-    with open(audio_file, 'rb') as audio:
-        audio_content = audio.read()
+    voice_client.start_recording(sink, recording_callback, interaction)
+    await asyncio.sleep(10)  # Record for 10 seconds
+    voice_client.stop_recording()
 
-    audio = speech.RecognitionAudio(content=audio_content)
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000,
-        language_code='en-US',
-    )
+    # Process recorded audio
+    temp_wav = await recording_callback(sink, interaction)
+    if not temp_wav:
+        await voice_client.disconnect()
+        return await interaction.followup.send("❌ Failed to record audio.")
 
-    response = speech_client.recognize(config=config, audio=audio)
-    if response.results:
-        recognized_text = response.results[0].alternatives[0].transcript
-    else:
+    # Process audio with Vosk
+    try:
+        model = vosk.Model("models/vosk-model-small-en-us-0.15")
+        wf = wave.open(temp_wav, "rb")
+        recognizer = vosk.KaldiRecognizer(model, wf.getframerate())
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if recognizer.AcceptWaveform(data):
+                result = recognizer.Result()
+                recognized_text = json.loads(result).get("text", "")
+                break
+        wf.close()
+    except Exception as e:
+        await voice_client.disconnect()
+        os.remove(temp_wav)
+        return await interaction.followup.send(f"❌ Voice recognition failed: {e}")
+
+    os.remove(temp_wav)
+    if not recognized_text:
         await voice_client.disconnect()
         return await interaction.followup.send("❌ Could not understand audio.")
 
     await interaction.followup.send(f"📝 You said: {recognized_text}")
 
+    # Process with translation and Groq
     english_text = translate_text(recognized_text, 'en')
     groq_response_en = get_groq_response(english_text)
     final_response = translate_text(groq_response_en, user_lang)
@@ -197,18 +200,17 @@ async def start_voice_interaction(interaction):
     for chunk in chunks:
         await interaction.followup.send(f"🤖 AidBot:\n```\n{chunk}\n```")
 
+    # Generate and send TTS
     temp_file = os.path.join(tempfile.gettempdir(), f"response_{int(time.time())}.mp3")
     try:
-        tts = gTTS(text=final_response, lang=user_lang)
-        tts.save(temp_file)
-        await play_audio(temp_file)
+        await generate_tts(final_response, user_lang, temp_file)
+        await interaction.followup.send(file=discord.File(temp_file))
+        os.remove(temp_file)
     except Exception as e:
-        await interaction.followup.send(f"🔊 Audio playback error: {e}")
+        await interaction.followup.send(f"🔊 Audio generation failed: {e}")
 
     await voice_client.disconnect()
     await send_listen_button(interaction.channel, user)
 
-# ======================
 # Run
-# ======================
 bot.run(TOKEN)
