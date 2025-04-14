@@ -20,6 +20,26 @@ import textwrap
 from dotenv import load_dotenv
 from playsound import playsound
 
+try:
+    import pygame
+    # Try to initialize mixer with error handling
+    if not pygame.mixer.get_init():
+        try:
+            pygame.mixer.init()
+            AUDIO_ENABLED = True
+            print("Audio system initialized successfully")
+        except Exception as e:
+            print(f"Audio initialization failed: {e}")
+            AUDIO_ENABLED = False
+except ImportError:
+    print("Pygame not available, audio disabled")
+    pygame = None
+    AUDIO_ENABLED = False
+
+# Rest of your imports
+import discord
+from discord.ext import commands
+
 # ======================
 # Configuration
 # ======================
@@ -115,21 +135,40 @@ def get_groq_response(prompt, lang="en"):
         return f"Error getting AI response: {e}"
 
 async def play_audio(audio_file):
-    if pygame:
+    if not AUDIO_ENABLED:
+        print("Audio playback skipped (audio system not available)")
         try:
-            if not pygame.mixer.get_init():
-                playsound("output.mp3")
-            while pygame.mixer.music.get_busy():
-                await asyncio.sleep(0.1)
-        finally:
+            os.remove(audio_file)
+        except:
+            pass
+        return
+    
+    try:
+        # Initialize mixer if not already initialized
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+            
+        pygame.mixer.music.load(audio_file)
+        pygame.mixer.music.play()
+        
+        # Wait for playback to finish
+        while pygame.mixer.music.get_busy():
+            await asyncio.sleep(0.1)
+            
+    except Exception as e:
+        print(f"Audio playback error: {e}")
+        try:
+            # Fallback to playsound if available
+            from playsound import playsound
+            playsound(audio_file)
+        except:
+            print("Could not play audio with any method")
+    finally:
+        try:
             pygame.mixer.quit()
-            try:
-                os.remove(audio_file)
-            except:
-                pass
-    else:
-        print("Audio skipped (running on Render).")
-
+            os.remove(audio_file)
+        except:
+            pass
 # ======================
 # Events
 # ======================
